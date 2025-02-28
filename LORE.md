@@ -1,0 +1,119 @@
+# ESB initial config
+- cycle POWER
+- set FREQUENCY
+- set TXPOWER
+- set MODE
+- set PCNF0:
+  - set LFLEN
+  - set S0LEN to 0
+  - set S1LEN to 3
+  - set CILEN to 0
+  - set PLEN to 8bit
+  - set CRCINC to Exclude
+  - set TERMLEN to 0
+- set PCNF1:
+  - set MAXLEN
+  - set STATLEN to 0
+  - set BALEN
+  - set ENDIAN to Big
+  - set STATLEN to 0 
+  - set WHITEEN to Disable
+- set BASE0
+- set BASE1
+- set PREFIX0
+- set PREFIX1
+- set CRCCNF:
+  - set LEN to 0-2
+  - set SKIPADDR to Include
+- set CRCPOLY:
+  - if CRCCNF.LEN == 1, 0b100000111
+  - if CRCCNF.LEN == 2, 0b10001000000100001
+- set CRCINIT:
+  - if CRCCNF.LEN == 1, 0xFF
+  - if CRCCNF.LEN == 2, 0xFFFF
+- reset TIFS to 0
+- reset DACNF to 0
+- set MODECNF0:
+  - RU to Fast
+  - DTX to B1(I think? this doesn't matter iiuc)
+- clear all interrupts with INTENCLR
+
+# ESB transmit flow with ACK
+
+- acquire a TIMER
+- reset TIMER state
+- set TIMER CC[0] to ACK timeout
+- set TIMER SHORTS:
+  - COMPARE0_STOP to Enabled
+  - COMPARE0_CLEAR to Enabled
+- set PACKETPTR
+- set TXADDRESS
+- set RXADDRESSES:
+  - TXADDRESS-corresponding to Enabled
+  - all else to Disabled
+- set SHORTS:
+  - READY_START to Enabled
+  - all else to Disabled
+- enable END interrupt
+- interrupt handler:
+  - set SHORTS:
+    - READY_START to Enabled
+    - END_DISABLE to Enabled (only change)
+    - all else to Disabled
+  - set PACKETPTR to recv buffer
+  - set PPI channels:
+    - RADIO EVENTS_READY to TIMER TASKS_START
+    - RADIO EVENTS_ADDRESS to TIMER TASKS_STOP
+    - TIMER EVENTS_COMPARE[0] to RADIO TASKS_DISABLE
+  - clear EVENTS_END
+  - disable END interrupt
+  - enable DISABLED interrupt
+  - interrupt handler:
+    - wake main task
+  - trigger TASKS_RXEN (this incurs *some* delay in turnaround since we need CPU involvement)
+- start retransmit timer
+- trigger TASKS_TXEN
+- wait for wake
+- if EVENTS_END is triggered and CRCSTATUS is CRCOk:
+  - return received packet, we're done here
+- wait for retransmit timer
+- goto start for retransmit if we have attempts left
+
+# ESB transmit flow without ACK
+
+- set PACKETPTR
+- set TXADDRESS
+- set SHORTS:
+  - READY_START to Enabled
+  - END_DISABLE to Enabled
+  - all else to Disabled
+- enable DISABLED interrupt
+- interrupt handler:
+  - wake main task
+- trigger TASKS_TXEN
+- wait for wake
+- transmit done!
+
+# ESB receive flow
+
+- set PACKETPTR
+- set RXADDRESSES
+- set SHORTS:
+  - READY_START to Enabled
+  - all else to Disabled
+- enable CRCOK interrupt
+- interrupt handler:
+  - if no ACK required, wake, return
+  - set SHORTS:
+    - READY_START to Enabled
+    - END_DISABLE to Enabled (only change)
+    - all else to Disabled
+  - set TXADDRESS
+  - set PACKETPTR to reply buffer
+  - disable CRCOK interrupt
+  - enable DISABLED interrupt
+  - interrupt handler:
+    - wake main task
+  - trigger TASKS_TXEN
+- wait for wake
+- receive done!

@@ -1,0 +1,13 @@
+[package]
+name = "esb-embassy"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+defmt = { version = "0.3.10", optional = true }
+embassy-nrf = { version = "0.3.1", features = ["nrf52840", "unstable-pac"] }
+embassy-sync = "0.6.2"
+embassy-time = "0.4.0"
+
+[features]
+defmt = ["dep:defmt"]
