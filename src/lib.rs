@@ -195,6 +195,66 @@ impl<'d, T: Instance> Radio<'d, T> {
         }
     }
 
+    pub fn set_address_length(&mut self, length: u8) -> Result<(), Error> {
+        if !(1..=4).contains(&length) {
+            return Err(Error::InvalidAddressLength);
+        }
+
+        let r = T::regs();
+        r.pcnf1().write(|w| {
+            w.set_maxlen(self.config.max_payload_length);
+            w.set_balen(length);
+            w.set_endian(Endian::BIG);
+            w.set_statlen(0);
+            w.set_whiteen(false);
+        });
+
+        Ok(())
+    }
+
+    pub fn set_base_address_0(&mut self, addr: [u8; 4]) {
+        let r = T::regs();
+        
+        r.base0().write_value(u32::from_le_bytes(addr).reverse_bits());
+    }
+
+    pub fn set_base_address_1(&mut self, addr: [u8; 4]) {
+        let r = T::regs();
+        
+        r.base1().write_value(u32::from_le_bytes(addr).reverse_bits());
+    }
+
+    pub fn set_prefixes(&mut self, prefixes: [u8; 8]) {
+        let r = T::regs();
+        
+        r.prefix0().write(|w| {
+            w.set_ap0((prefixes[0]).reverse_bits());
+            w.set_ap1((prefixes[1]).reverse_bits());
+            w.set_ap2((prefixes[2]).reverse_bits());
+            w.set_ap3((prefixes[3]).reverse_bits());
+        });
+        r.prefix1().write(|w| {
+            w.set_ap4((prefixes[4]).reverse_bits());
+            w.set_ap5((prefixes[5]).reverse_bits());
+            w.set_ap6((prefixes[6]).reverse_bits());
+            w.set_ap7((prefixes[7]).reverse_bits());
+        });
+    }
+
+    pub fn set_rf_channel(&mut self, channel: u8) -> Result<(), Error> {
+        if channel > 100 {
+            return Err(Error::InvalidChannel);
+        }
+        let r = T::regs();
+
+        r.frequency().write(|w| {
+            w.set_frequency(channel);
+            w.set_map(Map::DEFAULT);
+        });
+
+        Ok(())
+    }
+
     pub async fn try_send_no_ack(&mut self, packet: &mut Packet, address: u8) -> Result<(), Error> {
         if address >= 8 {
             return Err(Error::InvalidAddress);
@@ -335,7 +395,7 @@ impl<'d, T: Instance> Radio<'d, T> {
         Err(Error::MaxRetryExceeded)
     }
 
-    pub async fn try_recv(&mut self, address_mask: u8, reply_packet: &mut Packet) -> Packet {
+    pub async fn try_recv(&mut self, address_mask: u8, reply_packet: &mut [Packet; 8]) -> (Packet, u8, u16) {
         let mut recv_packet = Packet::new();
 
         let r = T::regs();
@@ -347,13 +407,14 @@ impl<'d, T: Instance> Radio<'d, T> {
         r.shorts().write(|w| {
             w.set_ready_start(true);
         });
-        r.events_crcok().write_value(0);
         r.events_end().write_value(0);
 
         s.rx_ack_packet_ptr
             .store(core::ptr::from_mut(reply_packet), Ordering::SeqCst);
 
-        r.intenset().write(|w| w.set_crcok(true));
+        r.intenset().write(|w| {
+            w.set_end(true)
+        });
 
         let dropper = OnDrop::new(|| self.disable());
 
@@ -373,7 +434,7 @@ impl<'d, T: Instance> Radio<'d, T> {
         dma_end_fence();
         dropper.defuse();
 
-        recv_packet
+        (recv_packet, r.rxmatch().read().rxmatch(), r.rxcrc().read().rxcrc() as u16)
     }
 
     /// Moves the radio from any state to the DISABLED state
@@ -450,6 +511,8 @@ impl<T: FnOnce()> Drop for OnDrop<T> {
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum Error {
     InvalidAddress,
+    InvalidAddressLength,
+    InvalidChannel,
     MaxRetryExceeded,
 }
 
@@ -544,6 +607,15 @@ impl<T: Instance> interrupt::typelevel::Handler<T::Interrupt> for InterruptHandl
         if ptr.is_null() && ptr_rx.is_null() {
             s.event_waker.wake();
         } else if ptr.is_null() {
+            if r.crcstatus().read().crcstatus() == Crcstatus::CRCERROR {
+                _ = s.rx_ack_packet_ptr.compare_exchange(null_mut(), ptr_rx, Ordering::SeqCst, Ordering::SeqCst);
+                
+                r.events_end().write_value(0);
+                r.intenset().write(|w| w.set_end(true));
+                dma_start_fence();
+                r.tasks_start().write_value(1);
+                return
+            }
             let recvd_packet = &*(r.packetptr().read() as *const Packet);
             if recvd_packet.buffer[1] & 1 == 1 {
                 s.event_waker.wake();
@@ -552,7 +624,9 @@ impl<T: Instance> interrupt::typelevel::Handler<T::Interrupt> for InterruptHandl
                     w.set_ready_start(true);
                     w.set_end_disable(true);
                 });
-                r.packetptr().write_value(ptr_rx.addr() as u32);
+                let addr = r.rxmatch().read().rxmatch();
+                r.txaddress().write(|w| w.set_txaddress(addr));
+                r.packetptr().write_value((ptr_rx as *mut Packet).offset(addr as isize).addr() as u32);
                 r.events_disabled().write_value(0);
                 r.intenset().write(|w| w.set_disabled(true));
 
@@ -629,7 +703,7 @@ impl<T: Instance> interrupt::typelevel::Handler<T::Interrupt> for InterruptHandl
 }
 
 type CallbackPassPtx = (Packet, [usize; 3], embassy_nrf::pac::timer::Timer);
-type CallbackPassPrx = Packet;
+type CallbackPassPrx = [Packet; 8];
 
 pub(crate) struct State {
     tx_ack_packet_ptr: AtomicPtr<CallbackPassPtx>,
