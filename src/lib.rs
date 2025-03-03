@@ -395,7 +395,7 @@ impl<'d, T: Instance> Radio<'d, T> {
         Err(Error::MaxRetryExceeded)
     }
 
-    pub async fn try_recv(&mut self, address_mask: u8, reply_packet: &mut [Packet; 8]) -> (Packet, u8, u16) {
+    pub async fn try_recv(&mut self, address_mask: u8, reply_packet: &mut [Packet; 8]) -> (Packet, u8, u16, u8) {
         let mut recv_packet = Packet::new();
 
         let r = T::regs();
@@ -406,6 +406,7 @@ impl<'d, T: Instance> Radio<'d, T> {
         r.rxaddresses().write(|w| w.0 = address_mask as u32);
         r.shorts().write(|w| {
             w.set_ready_start(true);
+            w.set_address_rssistart(true);
         });
         r.events_end().write_value(0);
 
@@ -434,7 +435,7 @@ impl<'d, T: Instance> Radio<'d, T> {
         dma_end_fence();
         dropper.defuse();
 
-        (recv_packet, r.rxmatch().read().rxmatch(), r.rxcrc().read().rxcrc() as u16)
+        (recv_packet, r.rxmatch().read().rxmatch(), r.rxcrc().read().rxcrc() as u16, r.rssisample().read().rssisample())
     }
 
     /// Moves the radio from any state to the DISABLED state
